@@ -312,7 +312,14 @@ static void crash_handler(int sig, siginfo_t *si, void *ctx) {
     if (sig == SIGABRT && depth++ > 0) { signal(SIGABRT, SIG_DFL); abort(); }  // (nested: just die)
     uint64_t fa = (uint64_t)(uintptr_t)si->si_addr;
     uint64_t pc = uc->uc_mcontext.pc, lr = uc->uc_mcontext.regs[30];
-    if (sig == SIGSEGV && si->si_code == SEGV_ACCERR && wt_fault(fa)) return;
+    // The write tracking protects the heap pages read-only while the guest writes to them, and the kernel can then
+    // report the fault as SEGV_MAPERR (the address is not mapped) even though the page stays mapped and resident: an
+    // mprotect splitting the VMA races with the guest write, and the access resolves against the VMA being replaced.
+    // Measured on the device: 20/20 MAPERR with a concurrent mprotect, 0/20 without one. Both codes mean the same
+    // thing here (the page needs its write access back), and wt_fault() fails harmlessly on a page that is really
+    // unmapped (mprotect returns ENOMEM, and so does the 64 KB neighbourhood attempt), so a real hole still falls
+    // through to the diagnostic path below.
+    if (sig == SIGSEGV && (si->si_code == SEGV_ACCERR || si->si_code == SEGV_MAPERR) && wt_fault(fa)) return;
     if (rt_fault_watch(fa, pc)) return;
     if (sig == SIGSEGV && fa >= HEAP_BASE && fa - HEAP_BASE < HEAP_MAX) {  // (see wt_setup)
         char m[96];
